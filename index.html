@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>File Compressor</title>
+<style>
+  :root{--bg:#0f0f10;--card:#18181b;--line:#2a2a2e;--text:#f4f4f5;--muted:#a1a1aa;--accent:#d4ff3a;--good:#4ade80;--bad:#f87171}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.45}
+  main{max-width:880px;margin:0 auto;padding:32px 18px 60px}
+  h1{font-size:28px;margin:0 0 4px;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0 0 24px}
+  #drop{border:2px dashed var(--line);border-radius:16px;padding:40px 20px;text-align:center;cursor:pointer;transition:.15s;background:var(--card)}
+  #drop.over{border-color:var(--accent);background:#1f2310}
+  #drop strong{display:block;font-size:18px;margin-bottom:6px}
+  #drop span{color:var(--muted);font-size:14px}
+  .settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:20px 0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  label{font-size:13px;color:var(--muted);display:block;margin-bottom:6px}
+  select,input[type=number]{width:100%;background:#0f0f10;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0 14px}
+  button{background:var(--accent);color:#111;border:0;border-radius:10px;padding:10px 16px;font-weight:600;cursor:pointer;font-size:14px}
+  button.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  #total{color:var(--muted);font-size:14px;margin-left:auto}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  td.num{white-space:nowrap}
+  .name{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .save{color:var(--good);font-weight:600}
+  .none{color:var(--muted)}
+  .err{color:var(--bad)}
+  td button{padding:6px 10px;font-size:12px}
+  #msg{min-height:20px;font-size:14px;color:var(--muted);margin-top:10px}
+  footer{margin-top:30px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<main>
+  <h1>File Compressor</h1>
+  <p class="sub">Shrink photos and zip any files. Everything happens in your browser; your files are never uploaded anywhere.</p>
+
+  <div id="drop" tabindex="0">
+    <strong>Drop files here or click to choose</strong>
+    <span>Photos (JPG, PNG, WebP) get resized and re-encoded. Other files get zipped.</span>
+    <input id="pick" type="file" multiple hidden>
+  </div>
+
+  <div class="settings">
+    <div>
+      <label for="quality">Photo quality: <b id="qv">80</b>%</label>
+      <input id="quality" type="range" min="30" max="95" value="80">
+    </div>
+    <div>
+      <label for="maxw">Max width (px, 0 = keep size)</label>
+      <input id="maxw" type="number" min="0" step="100" value="2000">
+    </div>
+    <div>
+      <label for="fmt">Photo output format</label>
+      <select id="fmt">
+        <option value="webp">WebP (smallest)</option>
+        <option value="jpeg">JPEG (works everywhere)</option>
+        <option value="same">Same as original</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="bar">
+    <button id="run" disabled>Compress</button>
+    <button id="all" class="ghost" disabled>Download all as .zip</button>
+    <button id="clear" class="ghost" disabled>Clear</button>
+    <span id="total"></span>
+  </div>
+
+  <table>
+    <thead><tr><th>File</th><th>Original</th><th>Compressed</th><th>Saved</th><th></th></tr></thead>
+    <tbody id="rows"><tr><td colspan="5" class="none">No files yet.</td></tr></tbody>
+  </table>
+  <div id="msg"></div>
+  <footer>Tip: for product photos on a shop, 2000px wide at 80% WebP usually looks identical and is a fraction of the size.</footer>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const drop = $('drop'), pick = $('pick'), rows = $('rows'), msg = $('msg');
+  const q = $('quality'), qv = $('qv'), maxw = $('maxw'), fmt = $('fmt');
+  let items = []; // {file, out:Blob|null, outName, status}
+
+  q.oninput = () => qv.textContent = q.value;
+  drop.onclick = () => pick.click();
+  drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') pick.click(); };
+  pick.onchange = () => { add(pick.files); pick.value = ''; };
+  ['dragenter','dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave','drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => add(e.dataTransfer.files));
+
+  function add(list){ for (const f of list) items.push({file:f, out:null, outName:null, status:'ready'}); render(); }
+
+  const fmtSize = n => n < 1024 ? n + ' B' : n < 1048576 ? (n/1024).toFixed(1) + ' KB' : (n/1048576).toFixed(2) + ' MB';
+  const isImg = f => /^image\/(jpeg|png|webp)$/.test(f.type) || /\.(jpe?g|png|webp)$/i.test(f.name);
+  const base = n => n.replace(/\.[^.]+$/, '');
+
+  function render(){
+    if (!items.length){ rows.innerHTML = '<tr><td colspan="5" class="none">No files yet.</td></tr>'; }
+    else rows.innerHTML = items.map((it,i) => {
+      const o = it.file.size, c = it.out ? it.out.size : null;
+      let saved = '<span class="none">—</span>';
+      if (it.status === 'working') saved = '<span class="none">Working…</span>';
+      else if (it.status === 'error') saved = '<span class="err">Failed</span>';
+      else if (c != null) saved = c < o ? `<span class="save">−${Math.round((1-c/o)*100)}%</span>` : '<span class="none">Already small</span>';
+      return `<tr><td class="name" title="${esc(it.file.name)}">${esc(it.file.name)}</td>
+        <td class="num">${fmtSize(o)}</td><td class="num">${c!=null?fmtSize(c):'—'}</td><td>${saved}</td>
+        <td>${it.out?`<button data-i="${i}">Download</button>`:''}</td></tr>`;
+    }).join('');
+    rows.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => { const it = items[+b.dataset.i]; save(it.outName, it.out); });
+    const done = items.filter(i => i.out);
+    $('run').disabled = !items.length; $('clear').disabled = !items.length; $('all').disabled = !done.length;
+    if (done.length){
+      const a = done.reduce((s,i)=>s+i.file.size,0), b = done.reduce((s,i)=>s+i.out.size,0);
+      $('total').textContent = `${fmtSize(a)} → ${fmtSize(b)}`;
+    } else $('total').textContent = '';
+  }
+  function esc(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  $('clear').onclick = () => { items = []; msg.textContent = ''; render(); };
+
+  $('run').onclick = async () => {
+    $('run').disabled = true; msg.textContent = '';
+    for (const it of items){
+      it.status = 'working'; render();
+      try {
+        if (isImg(it.file)) await compressImage(it);
+        else { it.out = await makeZip([{name: it.file.name, data: it.file}]); it.outName = it.file.name + '.zip'; }
+        it.status = 'done';
+      } catch (e) { console.error(e); it.status = 'error'; }
+      render();
+    }
+    msg.textContent = 'Done. Download files one by one, or all together as a .zip.';
+  };
+
+  async function compressImage(it){
+    const f = it.file;
+    const bmp = await createImageBitmap(f);
+    let w = bmp.width, h = bmp.height; const mw = +maxw.value || 0;
+    if (mw && w > mw){ h = Math.round(h * mw / w); w = mw; }
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    let type = fmt.value === 'webp' ? 'image/webp' : fmt.value === 'jpeg' ? 'image/jpeg'
+             : (f.type || (/\.png$/i.test(f.name) ? 'image/png' : /\.webp$/i.test(f.name) ? 'image/webp' : 'image/jpeg'));
+    if (type === 'image/jpeg'){ ctx.fillStyle = '#fff'; ctx.fillRect(0,0,w,h); } // no transparency in JPEG
+    ctx.drawImage(bmp, 0, 0, w, h); bmp.close && bmp.close();
+    let blob = await new Promise(r => cv.toBlob(r, type, q.value/100));
+    if (!blob || blob.type !== type){ type = 'image/jpeg'; blob = await new Promise(r => cv.toBlob(r, type, q.value/100)); }
+    const ext = type === 'image/webp' ? 'webp' : type === 'image/png' ? 'png' : 'jpg';
+    if (blob.size >= f.size && w === bmp.width){ it.out = f; it.outName = f.name; } // keep original if not smaller
+    else { it.out = blob; it.outName = base(f.name) + '-small.' + ext; }
+  }
+
+  // ---- Minimal ZIP writer (deflate via the browser's CompressionStream) ----
+  const crcTable = (() => { const t = new Uint32Array(256); for (let n=0;n<256;n++){ let c=n; for (let k=0;k<8;k++) c = c&1 ? 0xEDB88320^(c>>>1) : c>>>1; t[n]=c>>>0; } return t; })();
+  function crc32(u8){ let c = 0xFFFFFFFF; for (let i=0;i<u8.length;i++) c = crcTable[(c^u8[i])&0xFF]^(c>>>8); return (c^0xFFFFFFFF)>>>0; }
+  async function deflate(u8){
+    try {
+      const cs = new CompressionStream('deflate-raw');
+      const out = new Response(new Blob([u8]).stream().pipeThrough(cs));
+      return new Uint8Array(await out.arrayBuffer());
+    } catch (e) { return null; } // older browsers: file is stored uncompressed
+  }
+  async function makeZip(entries){
+    const enc = new TextEncoder(), parts = [], central = []; let offset = 0;
+    const now = new Date();
+    const dtime = (now.getHours()<<11)|(now.getMinutes()<<5)|(now.getSeconds()>>1);
+    const ddate = ((now.getFullYear()-1980)<<9)|((now.getMonth()+1)<<5)|now.getDate();
+    const used = new Set();
+    for (const e of entries){
+      let name = e.name, n = 1; while (used.has(name)) name = base(e.name) + ` (${n++})` + (e.name.match(/\.[^.]+$/)||[''])[0]; used.add(name);
+      const raw = new Uint8Array(await e.data.arrayBuffer());
+      const crc = crc32(raw); const def = await deflate(raw);
+      const useDef = def && def.length < raw.length; const body = useDef ? def : raw;
+      const nb = enc.encode(name);
+      const lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0,0x04034b50,true); lh.setUint16(4,20,true); lh.setUint16(6,0x0800,true); lh.setUint16(8,useDef?8:0,true);
+      lh.setUint16(10,dtime,true); lh.setUint16(12,ddate,true); lh.setUint32(14,crc,true);
+      lh.setUint32(18,body.length,true); lh.setUint32(22,raw.length,true); lh.setUint16(26,nb.length,true); lh.setUint16(28,0,true);
+      parts.push(lh.buffer, nb, body);
+      const ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0,0x02014b50,true); ch.setUint16(4,20,true); ch.setUint16(6,20,true); ch.setUint16(8,0x0800,true); ch.setUint16(10,useDef?8:0,true);
+      ch.setUint16(12,dtime,true); ch.setUint16(14,ddate,true); ch.setUint32(16,crc,true); ch.setUint32(20,body.length,true); ch.setUint32(24,raw.length,true);
+      ch.setUint16(28,nb.length,true); ch.setUint32(42,offset,true);
+      central.push(ch.buffer, nb);
+      offset += 30 + nb.length + body.length;
+    }
+    const cdSize = central.reduce((s,p)=>s+(p.byteLength||p.length),0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0,0x06054b50,true); end.setUint16(8,entries.length,true); end.setUint16(10,entries.length,true);
+    end.setUint32(12,cdSize,true); end.setUint32(16,offset,true);
+    return new Blob([...parts, ...central, end.buffer], {type:'application/zip'});
+  }
+
+  $('all').onclick = async () => {
+    const done = items.filter(i => i.out);
+    msg.textContent = 'Building zip…';
+    // Unwrap single-file zips so the bundle holds the real files, not zips inside a zip
+    const entries = done.map(i => i.outName.endsWith('.zip') && i.outName === i.file.name + '.zip'
+      ? {name: i.file.name, data: i.file} : {name: i.outName, data: i.out});
+    const z = await makeZip(entries);
+    msg.textContent = `Zip ready: ${fmtSize(z.size)}`;
+    save('compressed-files.zip', z);
+  };
+
+  // ---- Saving: Claude page capability if present, normal browser download otherwise ----
+  let dl = null;
+  if (window.claude && typeof window.claude.use === 'function'){
+    window.claude.use('downloads').then(d => { dl = d; }).catch(() => {});
+  }
+  async function save(name, blob){
+    if (window.AndroidBridge){ // running inside the Android app
+      const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(blob); });
+      msg.textContent = window.AndroidBridge.saveFile(name, b64, blob.type || 'application/octet-stream');
+      return;
+    }
+    if (dl){
+      try { await dl.save({filename: name, data: blob}); return; }
+      catch (e) { if (e && e.code === 'declined') return; msg.textContent = 'Download not available here: ' + (e && e.message || 'unknown error'); return; }
+    }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+})();
+</script>
+</body>
+</html>
